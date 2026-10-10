@@ -1,0 +1,28 @@
+{
+  "name": "leukemia-detection-backend",
+  "version": "1.0.0",
+  "description": "REST API for the AI-Based Multi-Modal Leukemia Detection System",
+  "main": "server.js",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "seed": "node scripts/seed.js",
+    "backfill:doctor-ids": "node scripts/backfillDoctorIds.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.5.1",
+    "pdfkit": "^0.15.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
