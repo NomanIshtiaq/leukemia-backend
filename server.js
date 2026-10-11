@@ -7,17 +7,26 @@ const mongoose = require("mongoose");
 const connectDB = require("./config/db");
 const authRoutes = require("./routes/authRoutes");
 const caseRoutes = require("./routes/caseRoutes");
+const adminRoutes = require("./routes/adminRoutes");
 const ApiError = require("./utils/ApiError");
+const { checkEnv } = require("./config/validateEnv");
 
-// Ensure JWT_SECRET is configured
-if (!process.env.JWT_SECRET) {
-  console.error(
-    "JWT_SECRET is not set. Copy .env.example to .env and configure it.",
-  );
-  process.exit(1);
-}
+// Refuse to start with a missing or (in production) weak JWT_SECRET. Only done
+// when the file is run directly, so tests can import the app without it.
+const runStartupChecks = () => {
+  const { fatal, warnings } = checkEnv(process.env);
+  warnings.forEach((message) => console.warn(`[config] ${message}`));
+  if (fatal.length) {
+    fatal.forEach((message) => console.error(`[config] ${message}`));
+    process.exit(1);
+  }
+};
 
 const app = express();
+
+// Render (and most hosts) sit behind a reverse proxy. Trusting one hop lets
+// request.ip, and therefore the login rate limiter, see the real client address.
+app.set("trust proxy", 1);
 
 // Configure allowed CORS origins
 const allowedOrigins = (process.env.CORS_ORIGINS || "")
@@ -69,6 +78,7 @@ app.get("/api/health", (req, res) => {
 // API routes
 app.use("/api/auth", authRoutes);
 app.use("/api/cases", caseRoutes);
+app.use("/api/admin", adminRoutes);
 
 // Handle unknown routes
 app.use((req, res, next) => {
@@ -112,9 +122,16 @@ app.use((err, req, res, next) => {
     return res.end();
   }
 
+  // `code` is a stable machine-readable reason (e.g. ACCOUNT_PENDING) set via
+  // ApiError; `details` carries extra safe fields such as the account status.
+  const code = err instanceof ApiError ? err.errorCode : undefined;
+  const details = err instanceof ApiError ? err.details : undefined;
+
   return res.status(status).json({
     success: false,
     message,
+    ...(code ? { code } : {}),
+    ...(details || {}),
   });
 });
 
@@ -151,16 +168,22 @@ const shutdown = (signal) => {
   });
 };
 
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
+// `node server.js` (npm start / Render) boots the API. Requiring this file from
+// a test only loads the Express app, without connecting or listening.
+if (require.main === module) {
+  runStartupChecks();
 
-process.on("unhandledRejection", (reason) => {
-  console.error("Unhandled rejection:", reason);
-});
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-start().catch((err) => {
-  console.error("Failed to start server:", err.message);
-  process.exit(1);
-});
+  process.on("unhandledRejection", (reason) => {
+    console.error("Unhandled rejection:", reason);
+  });
+
+  start().catch((err) => {
+    console.error("Failed to start server:", err.message);
+    process.exit(1);
+  });
+}
 
 module.exports = app;

@@ -12,6 +12,10 @@ const doctorData = {
   password: process.env.SEED_DOCTOR_PASSWORD || 'Doctor@12345',
   phone: process.env.SEED_DOCTOR_PHONE || '03001234567',
   role: 'doctor',
+  // Demo data only: the seeded doctor is approved explicitly so the sample
+  // workflow works. Real doctors always start as 'pending'.
+  status: 'approved',
+  hospitalName: 'Demo Hospital',
 };
 
 const sampleCase = {
@@ -35,6 +39,13 @@ const sampleCase = {
 };
 
 const run = async () => {
+  // Sample accounts with published credentials must not land in a live database
+  // by accident.
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SEED_IN_PRODUCTION !== 'true') {
+    throw new Error(
+      'Refusing to seed while NODE_ENV=production. Set ALLOW_SEED_IN_PRODUCTION=true only if you really mean it.'
+    );
+  }
   await connectDB();
 
   let doctor = await User.findOne({ email: doctorData.email });

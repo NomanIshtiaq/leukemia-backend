@@ -84,6 +84,17 @@ const patientCaseSchema = new mongoose.Schema(
     publishedAt: {
       type: Date,
     },
+    // Set the first time the patient opens the published report; lets the app
+    // show a "your report is ready" notice exactly once.
+    patientViewedAt: {
+      type: Date,
+    },
+    // Soft delete: archived cases disappear from the doctor's list and from the
+    // patient portal but are kept until the doctor deletes them permanently.
+    // Missing/null = active, so existing records need no migration.
+    archivedAt: {
+      type: Date,
+    },
   },
   { timestamps: true }
 );

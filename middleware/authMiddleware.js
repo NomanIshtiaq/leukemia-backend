@@ -21,12 +21,30 @@ const protect = asyncHandler(async (req, res, next) => {
     throw new ApiError(401, message);
   }
 
-  if (decoded.role === 'doctor') {
-    const doctor = await User.findById(decoded.id).select('name email role');
-    if (!doctor || doctor.role !== 'doctor') {
+  if (decoded.role === 'doctor' || decoded.role === 'admin') {
+    // Role and approval status are always re-read from the database. Nothing the
+    // client (or an old token) claims about them is trusted.
+    const account = await User.findById(decoded.id).select(
+      'name email role status tokenVersion'
+    );
+    if (!account || account.role !== decoded.role) {
       throw new ApiError(401, 'Account no longer exists');
     }
-    req.user = { id: doctor.id, role: 'doctor', name: doctor.name, email: doctor.email };
+
+    // A password change/reset bumps tokenVersion, which invalidates every token
+    // issued before it (exact, with no clock-resolution gap).
+    if ((decoded.tv || 0) !== (account.tokenVersion || 0)) {
+      throw new ApiError(401, 'Your password was changed, please sign in again');
+    }
+
+    req.user = {
+      id: account.id,
+      role: account.role,
+      name: account.name,
+      email: account.email,
+      // Legacy doctor accounts have no stored status; they count as 'pending'.
+      ...(account.role === 'doctor' ? { status: account.effectiveStatus() } : {}),
+    };
   } else if (decoded.role === 'patient' && decoded.caseId) {
     req.user = { id: decoded.id, role: 'patient', caseId: decoded.caseId };
   } else {
@@ -43,4 +61,29 @@ const authorize = (...roles) => (req, res, next) => {
   return next();
 };
 
-module.exports = { protect, authorize };
+const STATUS_BLOCK = {
+  pending: [
+    'ACCOUNT_PENDING',
+    'Your doctor account is awaiting administrator approval. You will be able to use the system once it is approved.',
+  ],
+  rejected: [
+    'ACCOUNT_REJECTED',
+    'Your doctor application was not approved. Please contact the administrator.',
+  ],
+};
+
+/**
+ * Blocks doctors whose application has not been approved. Place it after
+ * `protect`. Patients and admins pass straight through so it can sit on routes
+ * that serve several roles; combine it with `authorize(...)` or an ownership
+ * check to restrict who else gets in.
+ */
+const requireApprovedDoctor = (req, res, next) => {
+  if (req.user && req.user.role === 'doctor' && req.user.status !== 'approved') {
+    const [code, message] = STATUS_BLOCK[req.user.status] || STATUS_BLOCK.pending;
+    return next(new ApiError(403, message, { code, details: { status: req.user.status } }));
+  }
+  return next();
+};
+
+module.exports = { protect, authorize, requireApprovedDoctor, STATUS_BLOCK };

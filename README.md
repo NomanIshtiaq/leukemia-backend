@@ -65,3 +65,13 @@ curl -X POST localhost:5000/api/cases/mock-predict \
 - In development any `http://localhost:<port>` / `127.0.0.1` origin is allowed by CORS (Flutter web runs on a random port). In production only `CORS_ORIGINS` is honoured.
 - The image is not uploaded: `imageUrl` is a reference string (the app sends the file name) and the mock classifier only hashes it.
 - Set `DOCTOR_REGISTRATION_KEY` to stop open self-registration of doctor accounts.
+
+
+## Doctor invitations, admin approval and security
+
+Doctor accounts can only be created with a single-use invitation code issued by an administrator (shared over a WhatsApp click-to-chat link), and every new doctor starts as `pending` until an administrator approves them.
+
+- API reference and workflow: [docs/DOCTOR_APPROVAL_API.md](docs/DOCTOR_APPROVAL_API.md)
+- First administrator: `ADMIN_EMAIL=... ADMIN_PASSWORD=... npm run create-admin` (safe to re-run)
+- Doctor accounts created before this feature are treated as `pending`: `npm run list:legacy-doctors`, then approve each one from the admin dashboard
+- Tests: set `TEST_MONGO_URI` to a throw-away database whose name contains `test`, then `npm test`

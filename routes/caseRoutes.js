@@ -1,7 +1,8 @@
 const crypto = require('crypto');
 const express = require('express');
 const PatientCase = require('../models/PatientCase');
-const { protect, authorize } = require('../middleware/authMiddleware');
+const { protect, authorize, requireApprovedDoctor } = require('../middleware/authMiddleware');
+const { recordAudit } = require('../utils/audit');
 const ApiError = require('../utils/ApiError');
 const asyncHandler = require('../utils/asyncHandler');
 const { normalizePhone, requireString, escapeRegex } = require('../utils/helpers');
@@ -56,6 +57,22 @@ const pickCbc = (input) => {
 const pickImageUrl = (value) =>
   typeof value === 'string' && value.trim() ? value.trim() : undefined;
 
+const parseAge = (value) => {
+  const age = Number(value);
+  if (!Number.isFinite(age) || age < 0 || age > 120) {
+    throw new ApiError(400, 'Age must be a number between 0 and 120');
+  }
+  return age;
+};
+
+const parseGender = (value) => {
+  const gender = String(value || '').toLowerCase();
+  if (!GENDERS.includes(gender)) {
+    throw new ApiError(400, `Gender must be one of: ${GENDERS.join(', ')}`);
+  }
+  return gender;
+};
+
 const generateCaseId = async () => {
   const year = new Date().getFullYear();
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -79,6 +96,7 @@ router.post(
   '/mock-predict',
   protect,
   authorize('doctor'),
+  requireApprovedDoctor,
   asyncHandler(async (req, res) => {
     const symptoms = pickSymptoms(req.body.symptoms);
     const cbcData = pickCbc(req.body.cbcData);
@@ -98,6 +116,7 @@ router.post(
   '/create',
   protect,
   authorize('doctor'),
+  requireApprovedDoctor,
   asyncHandler(async (req, res) => {
     const patientName = requireString(req.body.patientName, 'Patient name');
     const phone = normalizePhone(requireString(req.body.phone, 'Phone number'));
@@ -168,8 +187,13 @@ router.get(
   '/doctor',
   protect,
   authorize('doctor'),
+  requireApprovedDoctor,
   asyncHandler(async (req, res) => {
-    const filter = { doctorId: req.user.id };
+    // Archived cases are hidden by default; ?archived=true lists only those.
+    const filter = {
+      doctorId: req.user.id,
+      archivedAt: req.query.archived === 'true' ? { $ne: null } : null,
+    };
 
     if (STATUSES.includes(req.query.status)) {
       filter.status = req.query.status;
@@ -189,6 +213,7 @@ router.get(
 router.get(
   '/patient/:caseId',
   protect,
+  requireApprovedDoctor,
   asyncHandler(async (req, res) => {
     const caseId = req.params.caseId.toUpperCase();
     const patientCase = await PatientCase.findOne({ caseId }).populate('doctorId', 'name email phone');
@@ -196,6 +221,9 @@ router.get(
     if (!patientCase) throw new ApiError(404, 'Case not found');
     if (!ownsCase(req.user, patientCase)) {
       throw new ApiError(403, 'You do not have access to this case');
+    }
+    if (req.user.role === 'patient' && patientCase.archivedAt) {
+      throw new ApiError(404, 'Case not found');
     }
 
     // Patients only see clinical data once the doctor has published the report.
@@ -211,7 +239,23 @@ router.get(
       });
     }
 
-    return res.json({ success: true, case: patientCase });
+    // First time this patient opens the published report: flag it once so the
+    // app can show a "your report is ready" notice. The conditional update means
+    // simultaneous requests cannot both claim it.
+    let isNewReport = false;
+    if (req.user.role === 'patient' && !patientCase.patientViewedAt) {
+      const marked = await PatientCase.updateOne(
+        { _id: patientCase._id, patientViewedAt: null },
+        { $set: { patientViewedAt: new Date() } }
+      );
+      isNewReport = marked.modifiedCount === 1;
+    }
+
+    return res.json({
+      success: true,
+      case: patientCase,
+      ...(req.user.role === 'patient' ? { isNewReport } : {}),
+    });
   })
 );
 
@@ -219,6 +263,7 @@ router.patch(
   '/:caseId',
   protect,
   authorize('doctor'),
+  requireApprovedDoctor,
   asyncHandler(async (req, res) => {
     const caseId = req.params.caseId.toUpperCase();
     const patientCase = await PatientCase.findOne({ caseId });
@@ -227,11 +272,27 @@ router.patch(
     if (!ownsCase(req.user, patientCase)) {
       throw new ApiError(403, 'You do not have access to this case');
     }
-    if (patientCase.status === 'completed') {
-      throw new ApiError(409, 'This report has been published and can no longer be edited');
+    if (patientCase.archivedAt) {
+      throw new ApiError(409, 'This case is archived. Restore it before editing.');
     }
 
     const body = req.body || {};
+
+    // A published report's clinical content is locked; the patient's own
+    // details (name, age, gender, phone) can still be corrected.
+    const CLINICAL_KEYS = ['symptoms', 'cbcData', 'imageUrl', 'aiResults', 'doctorNotes', 'status'];
+    if (patientCase.status === 'completed' && CLINICAL_KEYS.some((key) => body[key] !== undefined)) {
+      throw new ApiError(409, 'This report has been published and can no longer be edited');
+    }
+
+    if (body.patientName !== undefined) {
+      patientCase.patientName = requireString(body.patientName, 'Patient name');
+    }
+    if (body.age !== undefined) patientCase.age = parseAge(body.age);
+    if (body.gender !== undefined) patientCase.gender = parseGender(body.gender);
+    if (body.phone !== undefined) {
+      patientCase.phone = normalizePhone(requireString(body.phone, 'Phone number'));
+    }
 
     if (body.symptoms !== undefined) patientCase.symptoms = pickSymptoms(body.symptoms);
     if (body.cbcData !== undefined) patientCase.cbcData = pickCbc(body.cbcData);
@@ -268,15 +329,94 @@ router.patch(
       }
     }
 
+    const publishing = patientCase.isModified('status') && patientCase.status === 'completed';
     await patientCase.save();
+    if (publishing) {
+      await recordAudit(req, 'case.publish', { targetType: 'case', targetId: patientCase.caseId });
+    }
 
     res.json({ success: true, message: 'Case updated', case: patientCase });
+  })
+);
+
+// Soft delete: hides the case from lists and from the patient portal.
+router.post(
+  '/:caseId/archive',
+  protect,
+  authorize('doctor'),
+  requireApprovedDoctor,
+  asyncHandler(async (req, res) => {
+    const caseId = req.params.caseId.toUpperCase();
+    const patientCase = await PatientCase.findOne({ caseId });
+    if (!patientCase) throw new ApiError(404, 'Case not found');
+    if (!ownsCase(req.user, patientCase)) {
+      throw new ApiError(403, 'You do not have access to this case');
+    }
+
+    const archived = await PatientCase.findOneAndUpdate(
+      { _id: patientCase._id, archivedAt: null },
+      { $set: { archivedAt: new Date() } },
+      { new: true }
+    );
+    if (!archived) throw new ApiError(409, 'This case is already archived');
+
+    await recordAudit(req, 'case.archive', { targetType: 'case', targetId: caseId });
+    res.json({ success: true, message: 'Case archived', case: archived });
+  })
+);
+
+router.post(
+  '/:caseId/restore',
+  protect,
+  authorize('doctor'),
+  requireApprovedDoctor,
+  asyncHandler(async (req, res) => {
+    const caseId = req.params.caseId.toUpperCase();
+    const patientCase = await PatientCase.findOne({ caseId });
+    if (!patientCase) throw new ApiError(404, 'Case not found');
+    if (!ownsCase(req.user, patientCase)) {
+      throw new ApiError(403, 'You do not have access to this case');
+    }
+
+    const restored = await PatientCase.findOneAndUpdate(
+      { _id: patientCase._id, archivedAt: { $ne: null } },
+      { $unset: { archivedAt: 1 } },
+      { new: true }
+    );
+    if (!restored) throw new ApiError(409, 'This case is not archived');
+
+    await recordAudit(req, 'case.restore', { targetType: 'case', targetId: caseId });
+    res.json({ success: true, message: 'Case restored', case: restored });
+  })
+);
+
+// Permanent deletion is only possible for a case that was archived first.
+router.delete(
+  '/:caseId',
+  protect,
+  authorize('doctor'),
+  requireApprovedDoctor,
+  asyncHandler(async (req, res) => {
+    const caseId = req.params.caseId.toUpperCase();
+    const patientCase = await PatientCase.findOne({ caseId });
+    if (!patientCase) throw new ApiError(404, 'Case not found');
+    if (!ownsCase(req.user, patientCase)) {
+      throw new ApiError(403, 'You do not have access to this case');
+    }
+    if (!patientCase.archivedAt) {
+      throw new ApiError(409, 'Archive the case first; only archived cases can be deleted permanently');
+    }
+
+    await PatientCase.deleteOne({ _id: patientCase._id, archivedAt: { $ne: null } });
+    await recordAudit(req, 'case.delete', { targetType: 'case', targetId: caseId });
+    res.json({ success: true, message: 'Case deleted permanently' });
   })
 );
 
 router.get(
   '/pdf/:caseId',
   protect,
+  requireApprovedDoctor,
   asyncHandler(async (req, res) => {
     const caseId = req.params.caseId.toUpperCase();
     const patientCase = await PatientCase.findOne({ caseId }).populate('doctorId', 'name email phone');
@@ -286,6 +426,9 @@ router.get(
       throw new ApiError(403, 'You do not have access to this case');
     }
 
+    if (req.user.role === 'patient' && patientCase.archivedAt) {
+      throw new ApiError(404, 'Case not found');
+    }
     if (req.user.role === 'patient' && patientCase.status !== 'completed') {
       throw new ApiError(403, 'Your report has not been published yet');
     }
