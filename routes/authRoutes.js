@@ -334,18 +334,28 @@ router.post(
   })
 );
 
-// Password reset without e-mail or SMS: the doctor asks, the administrator
-// generates a one-time reset code and sends it over WhatsApp (admin routes),
-// and the doctor redeems it here.
+// Password reset without e-mail or SMS: the doctor asks with their email and
+// WhatsApp number, the administrator sees a "Password reset request" in the
+// Pending list, generates a one-time reset code and sends it to that WhatsApp
+// number (admin routes), and the doctor redeems it here.
 router.post(
   '/forgot-password',
   ...loginLimiters,
   asyncHandler(async (req, res) => {
     const email = requireEmail(req.body.email);
+    // Optional here so older app versions keep working. A badly formatted number
+    // says nothing about whether an account exists.
+    const hasPhone = typeof req.body.phone === 'string' && req.body.phone.trim() !== '';
+    const phone = hasPhone ? requireE164(req.body.phone, 'WhatsApp number') : null;
 
     const result = await User.updateOne(
       { email, role: 'doctor' },
-      { $set: { passwordResetRequestedAt: new Date() } }
+      {
+        $set: {
+          passwordResetRequestedAt: new Date(),
+          ...(phone ? { passwordResetRequestedPhone: phone } : {}),
+        },
+      }
     );
     if (result.matchedCount) {
       await recordAudit(req, 'auth.password_reset_requested', { targetType: 'email', targetId: email });
@@ -378,6 +388,7 @@ router.post(
       doctor.passwordChangedAt = new Date();
       doctor.tokenVersion = (doctor.tokenVersion || 0) + 1; // revokes every older token
       doctor.passwordResetRequestedAt = undefined;
+      doctor.passwordResetRequestedPhone = undefined;
       await doctor.save();
     } catch (err) {
       await releaseInvitation(invitation);

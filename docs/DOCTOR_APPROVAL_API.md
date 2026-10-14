@@ -61,8 +61,8 @@ Returns the live account (a pending/rejected doctor who holds an old token still
 `{ "currentPassword", "newPassword" }` → `{ "success": true, "token": "<fresh token>" }`. Old tokens stop working. Wrong current password is **400** (not 401, so the app does not sign out).
 
 ### Forgot password (no e-mail/SMS)
-1. `POST /api/auth/forgot-password` `{ "email" }` → always `200` with the same message. The admin sees `passwordResetRequested: true`.
-2. Admin: `POST /api/admin/doctors/:id/password-reset-code` → code + WhatsApp link (expires in 1 h).
+1. `POST /api/auth/forgot-password` `{ "email", "phone" }` → always `200` with the same message (`400` only if `phone` is given but is not a valid international number). `phone` is the doctor's WhatsApp number. The admin sees `passwordResetRequested: true` and `passwordResetPhone`, and the request appears in `GET /api/admin/doctors?status=pending` (the app titles it "Password reset request").
+2. Admin: `POST /api/admin/doctors/:id/password-reset-code` → code + WhatsApp link to the number the doctor gave (expires in 1 h). Compare it with the registered `phone` before sending.
 3. `POST /api/auth/reset-password` `{ "email", "code", "newPassword" }` → `200`; sign in with the new password.
 
 ## Admin (all require an admin token; others get 401/403)

@@ -100,6 +100,9 @@ const userSchema = new mongoose.Schema(
     // Set when a doctor asks for a password reset so the administrator can see
     // who is waiting. Cleared when the password is reset.
     passwordResetRequestedAt: { type: Date },
+    // WhatsApp number (E.164) the doctor typed when asking for the reset code.
+    // The administrator sends the code to it. Cleared when the password is reset.
+    passwordResetRequestedPhone: { type: String, trim: true },
     // Informational: when the password was last changed or reset.
     passwordChangedAt: { type: Date },
     // Embedded in every doctor/admin JWT (claim `tv`). Bumped on password

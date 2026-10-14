@@ -65,6 +65,8 @@ const doctorView = (doctor) => ({
   reviewNote: doctor.reviewNote || null,
   passwordResetRequested: Boolean(doctor.passwordResetRequestedAt),
   passwordResetRequestedAt: doctor.passwordResetRequestedAt || null,
+  // WhatsApp number the doctor typed when asking for the reset code.
+  passwordResetPhone: doctor.passwordResetRequestedPhone || null,
   // Registered before the approval workflow existed (no stored status).
   legacy: !doctor.status,
   registeredAt: doctor.createdAt,
@@ -87,7 +89,19 @@ router.get(
     const limit = clampInt(req.query.limit, 50, 1, 100);
     const page = clampInt(req.query.page, 1, 1, 10000);
 
-    const filter = { role: 'doctor', ...statusFilter(status) };
+    // "Pending" is the admin's inbox: new applications AND password reset
+    // requests from approved doctors. (Reset requests also stay in "approved".)
+    const filter = {
+      role: 'doctor',
+      ...(status === 'pending'
+        ? {
+            $or: [
+              ...statusFilter('pending').$or,
+              { status: 'approved', passwordResetRequestedAt: { $ne: null } },
+            ],
+          }
+        : statusFilter(status)),
+    };
     if (typeof req.query.q === 'string' && req.query.q.trim()) {
       const pattern = new RegExp(escapeRegex(req.query.q.trim().slice(0, 80)), 'i');
       filter.$and = [{ $or: [{ name: pattern }, { email: pattern }, { pmdcNumber: pattern }] }];
@@ -204,8 +218,13 @@ router.post(
     const doctor = await loadDoctor(req.params.id);
     const ttlHours = parseTtlHours(req.body.expiresInHours, RESET_CODE_TTL_HOURS);
 
-    // Prefer the number on file; fall back to one the administrator types.
-    const phone = toE164(req.body.phone) || toE164(doctor.phone) || null;
+    // Send to the number the doctor gave with the request; otherwise the number
+    // on file; an administrator-typed number overrides both.
+    const phone =
+      toE164(req.body.phone) ||
+      toE164(doctor.passwordResetRequestedPhone) ||
+      toE164(doctor.phone) ||
+      null;
 
     const { invitation, code, expiresInHours } = await createInvitation({
       purpose: 'password_reset',
